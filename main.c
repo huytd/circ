@@ -3,11 +3,57 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <netdb.h>
+#include <ncurses.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <stdarg.h>
+#include <poll.h>
 #include "expect.h"
 
 #define CHUNK_SIZE 2048
+#define RL_BUFSIZE 1024
+
+#define clear() printf("\033[H\033[J")
+#define gotoxy(x,y) printf("\033[%d;%dH", (x), (y))
+
+char* term_readline() {
+  int position;
+  int bufsize;
+  char* buffer;
+  char c;
+
+  position = 0;
+  bufsize = sizeof(char) * RL_BUFSIZE;
+  buffer = malloc(bufsize);
+  if (!buffer) {
+    fprintf(stderr, "ERROR: Could not allocate buffer!\n");
+    exit(EXIT_FAILURE);
+  }
+
+  while (1) {
+    c = getchar();
+
+    if (c == EOF || c == '\n') {
+      buffer[position] = '\0';
+      return buffer;
+    } else {
+      buffer[position] = c;
+    }
+
+    if (position > bufsize) {
+      return buffer;
+    }
+    
+    position++;
+  }
+}
+
+int term_execute(const char* line) {
+  if (strcmp(line, "exit") == 0) {
+    return 1;
+  }
+  return 0;
+}
 
 int irc_send(int socket, char* fmt,...) {
   char msg[512];
@@ -21,48 +67,23 @@ int irc_send(int socket, char* fmt,...) {
   return send(socket, msg, strlen(msg), 0);
 }
 
-char* irc_get(void) {
-    char * line = malloc(100), * linep = line;
-    size_t lenmax = 100, len = lenmax;
-    int c;
-
-    if(line == NULL)
-        return NULL;
-
-    for(;;) {
-        c = fgetc(stdin);
-        if(c == EOF)
-            break;
-
-        if(--len == 0) {
-            len = lenmax;
-            char * linen = realloc(linep, lenmax *= 2);
-
-            if(linen == NULL) {
-                free(linep);
-                return NULL;
-            }
-            line = linen + (line - linep);
-            linep = linen;
-        }
-
-        if((*line++ = c) == '\n')
-            break;
-    }
-    *line = '\0';
-    return linep;
-}
-
 int main() {
+  int max_x, max_y;
+
   int socket_desc;
   struct sockaddr_in server;
-  char* recv_chunk[CHUNK_SIZE];
   int ret;
 
   char *hostname = "irc.freenode.net";
   char ip[100];
   struct hostent *he;
   struct in_addr **addr_list;
+
+  initscr();
+  noecho();
+  curs_set(FALSE);
+
+  getmaxyx(stdscr, max_y, max_x);
 
   he = gethostbyname(hostname);
   expect(he != NULL, "Error getting host name");
@@ -71,11 +92,11 @@ int main() {
     strcpy(ip, inet_ntoa(*addr_list[i]));
   }
 
-  printf("Connecting to %s...\n", ip);
+  //printf("Connecting to %s...\n", ip);
 
   socket_desc = socket(AF_INET, SOCK_STREAM, 0);
   expect(socket_desc != -1, "Could not create socket!");
-  printf("Socket client created!\n");
+  //printf("Socket client created!\n");
 
   server.sin_addr.s_addr = inet_addr(ip);
   server.sin_family = AF_INET;
@@ -83,23 +104,52 @@ int main() {
   
   ret = connect(socket_desc, (struct sockaddr *)&server, sizeof(server));
   expect(ret >= 0, "Connection error!");
-  printf("Connected to server!\n");
+  //printf("Connected to server!\n");
 
   ret = 1;
 
-  while (ret > 0) {
-    ret = recv(socket_desc, recv_chunk, CHUNK_SIZE, 0);
-    expect(ret >= 0, "Recv failed!");
+  int exit;
+  char *line;
+  
+  struct pollfd fds[2];
 
-    char* server_response = (char*) recv_chunk;
-    puts(server_response);
+  fds[0].fd = socket_desc;
+  fds[0].events = POLLIN;
 
-    if (strstr(server_response, "Found your hostname") != NULL) {
-      irc_send(socket_desc, "NICK %s\r\n", "huytestnick1");
-      irc_send(socket_desc, "USER %s 0 * :%s\r\n", "huytestnick1", "Huy Tran");
-      irc_send(socket_desc, "JOIN %s\r\n", "#huytestroom");
+  fds[1].fd = fileno(stdin);
+  fds[1].events = POLLIN;
+  
+  do {
+    while( poll(fds, 2, 0) >= 0 ) {
+      if (fds[0].revents & POLLIN) {
+        char* recv_chunk;
+        recv_chunk = malloc(sizeof(char) * CHUNK_SIZE);
+        ret = recv(socket_desc, recv_chunk, CHUNK_SIZE, 0);
+
+        char* server_response = recv_chunk;
+        if (strlen(server_response) > 0) {
+          printf("[%lu] %s\n", strlen(server_response), server_response);
+        }
+      } else if (fds[1].revents & POLLIN) {
+        printf("> ");
+
+        line = term_readline();
+        exit = term_execute(line);
+
+        if (exit == 0) {
+          if (strcmp(line, "login") == 0) {
+            irc_send(socket_desc, "NICK %s\r\n", "huytestnick1");
+            irc_send(socket_desc, "USER %s 0 * :%s\r\n", "huytestnick1", "Huy Tran");
+            irc_send(socket_desc, "JOIN %s\r\n", "#huytestroom");
+          } else if (strcmp(line, "") != 0) {
+            irc_send(socket_desc, "%s\r\n", line);
+          }
+        }
+
+        free(line);
+      }
     }
-  }
+  } while(!exit);
 
   close(socket_desc);
 

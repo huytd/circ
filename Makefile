@@ -1,7 +1,7 @@
 CC=gcc
 SRC=main.c
 BIN=irc
-FLGS=-Wall
+FLGS=-Wall -lncurses
 DEBUG_BIN=debug
 DEBUG_FLG=-g -Wall
 
